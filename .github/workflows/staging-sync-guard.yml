@@ -1,0 +1,41 @@
+name: Staging Sync Guard
+
+on:
+  push:
+    branches:
+      - staging # staging에 머지가 일어났을 때만 작동! 무거운 빌드는 타지 않음
+
+jobs:
+  audit-prs:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      
+      - name: Audit Open PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git fetch origin staging:staging
+          STAGING_HEAD=$(git rev-parse staging)
+          
+          # 퀄리티 확보를 위해 dependabot을 제외한 qa, staging 타겟 PR만 조회
+          PR_LIST=$(gh pr list --state open --json number,baseRefName,headRefName,headSha,author --jq '.[] | select((.baseRefName=="qa" or .baseRefName=="staging") and .author.login != "dependabot[bot]") | "\(.number)|\(.baseRefName)|\(.headRefName)|\(.headSha)"')
+          
+          if [ -z "$PR_LIST" ]; then
+            echo "검사 대상 PR 없음"
+            exit 0
+          fi
+          
+          echo "$PR_LIST" | while IFS='|' read -r pr_number pr_base pr_head pr_sha; do
+            git fetch origin $pr_head:$pr_head
+            if git merge-base --is-ancestor $STAGING_HEAD $pr_sha; then
+              echo "✅ PR #$pr_number ok"
+            else
+              gh pr comment $pr_number --body "⚠️ **알림**: 최신 'staging' 변경사항이 누락되었습니다. 머지 전 싱크를 맞춰주세요."
+            fi
+          done
