@@ -20,22 +20,34 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git fetch origin staging:staging
-          STAGING_HEAD=$(git rev-parse staging)
+          # 1. 로컬 브랜치에 덮어쓰지 않고, 원격의 브랜치 정보만 안전하게 업데이트합니다.
+          git fetch origin staging
           
-          # 퀄리티 확보를 위해 dependabot을 제외한 qa, staging 타겟 PR만 조회
+          # 2. 로컬 'staging' 대신 원격의 'origin/staging' 최신 커밋 해시를 가져옵니다.
+          STAGING_HEAD=$(git rev-parse origin/staging)
+          echo "🚀 Latest Remote Staging Head SHA: $STAGING_HEAD"
+          echo "------------------------------------------------"
+          
+          # 3. 오픈된 PR 목록 수집 (기존과 동일)
           PR_LIST=$(gh pr list --state open --json number,baseRefName,headRefName,headSha,author --jq '.[] | select((.baseRefName=="qa" or .baseRefName=="staging") and .author.login != "dependabot[bot]") | "\(.number)|\(.baseRefName)|\(.headRefName)|\(.headSha)"')
           
           if [ -z "$PR_LIST" ]; then
-            echo "검사 대상 PR 없음"
+            echo "✅ 현재 검사할 대상 PR이 없습니다."
             exit 0
           fi
           
+          # 4. 루프를 돌며 검사
           echo "$PR_LIST" | while IFS='|' read -r pr_number pr_base pr_head pr_sha; do
+            echo "🔍 검사 중: PR #$pr_number [ $pr_head -> $pr_base ]"
+            
+            # 대상 feature 브랜치를 원격에서 안전하게 로컬로 fetch
             git fetch origin $pr_head:$pr_head
+            
             if git merge-base --is-ancestor $STAGING_HEAD $pr_sha; then
-              echo "✅ PR #$pr_number ok"
+              echo "  ✅ 최신 staging 상태를 잘 유지하고 있습니다."
             else
-              gh pr comment $pr_number --body "⚠️ **알림**: 최신 'staging' 변경사항이 누락되었습니다. 머지 전 싱크를 맞춰주세요."
+              echo "  ❌ [경고] Stale 상태 감지됨!"
+              gh pr comment $pr_number --body "⚠️ **알림**: 'staging' 브랜치에 새로운 코드가 반영되어 이 브랜치가 **Stale(뒤처짐)** 상태가 되었습니다. 머지 순서가 꼬일 수 있으니 최신 \`staging\`을 머지하거나 리베이스 해주세요! 🙏"
             fi
+            echo "------------------------------------------------"
           done
