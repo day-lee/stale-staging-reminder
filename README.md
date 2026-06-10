@@ -1,5 +1,5 @@
 # stale-staging-reminder
-staging first commit
-making a change in staging after feature -> qa PR created, which will make feature base stale..
-- fix error in audit open prs
-- new change
+1. create a feature branch from up-to-date staging branch
+2. create a PR from "feature to qa"
+3. make a change in staging
+4. check if recently open PR(which base became stale after step 3) got reminder message.
