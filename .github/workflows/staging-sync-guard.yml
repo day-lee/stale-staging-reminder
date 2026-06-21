@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Set to true to verify the logs only without posting actual comments'
+        description: '실제 댓글을 달지 않고 로그만 확인하려면 true로 설정하세요'
         required: true
         default: 'true'
 
@@ -24,45 +24,44 @@ jobs:
           GH_REPO: ${{ github.repository }}
           CURRENT_REPO: ${{ github.repository }}
           EVENT_NAME: ${{ github.event_name }}
-          # Safely forward the original text to prevent system variable naming conflicts
+          # 💡 수동 트리거일 때만 입력값을 전달하고, push일 때는 공백이 들어옵니다.
           MY_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
         run: |
-          echo "🚀 Starting Staging Sync Guard (Strict Up-to-date Staging Policy)"
+          echo "🚀 Starting Staging Sync Guard (Strict Up-to-date Policy)"
           echo "📍 Current Repository Context: '$CURRENT_REPO'"
           echo "📍 Raw Trigger Event: '$EVENT_NAME'"
+          echo "'$MY_DRY_RUN'"
           echo "------------------------------------------------"
           
-          # 1. Mode Evaluation Safeguard
-          # Convert incoming string to lowercase to handle both 'True' and 'true' seamlessly
-          DRY_RUN_LOWER=$(echo "${MY_DRY_RUN,,}")
           
-          # Activate dry-run mode only if manually triggered and explicitly set to true
-          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$DRY_RUN_LOWER" = "true" ]; then
+          # 1. ⚙️ [모드 판별 안전장치 - 완벽 패치]
+          # 오직 수동 트리거(workflow_dispatch)이면서 명시적으로 true를 입력했을 때만 무알림 모드 발동
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "${MY_DRY_RUN,,}" = "true" ]; then
             IS_DRY_RUN="true"
-            echo "⚙️ Mode: [DRY-RUN] Executing log-only mode. No comments will be published."
+            echo "⚙️ Mode: [DRY-RUN] 실제 댓글을 달지 않고 로그만 출력합니다."
           else
             IS_DRY_RUN="false"
-            echo "⚙️ Mode: [PRODUCTION] Live mode active. Stale PRs will receive warning comments."
+            echo "⚙️ Mode: [PRODUCTION] 뒤처진 PR 발견 시 실제 알림 댓글을 작성합니다."
           fi
           echo "------------------------------------------------"
           
-          # 2. Fetch the latest commit SHA of the remote staging branch
+          # 2. 원격 staging 브랜치의 최신 커밋 SHA 확보
           STAGING_HEAD=$(gh api repos/$CURRENT_REPO/branches/staging --jq '.commit.sha')
           echo "📍 Current Staging Latest SHA: $STAGING_HEAD"
           echo "------------------------------------------------"
           
-          # 3. Extract open PRs targeting the 'qa' branch (excluding Dependabot)
-          # Explicitly pass the --repo flag to ensure the CLI operates seamlessly without a local .git directory
+          # 3. qa 브랜치를 타깃으로 하는 open PR 목록 추출 (Dependabot 제외)
+          # 💡 [해결]: --repo 옵션을 명시하여 .git 폴더가 없어도 원격에서 PR 목록을 정확히 가져옵니다.
           PR_JSON=$(gh pr list --repo $CURRENT_REPO --state open --json number,baseRefName,headRefName,headRefOid,author,headRepositoryOwner \
             --jq '[.[] | select((.baseRefName=="qa") and (.author.login | test("dependabot"; "i") | not))]')
           
           PR_COUNT=$(echo "$PR_JSON" | jq '. | length')
           if [ "$PR_COUNT" -eq 0 ]; then
-            echo "✅ No target open PRs destined for 'qa' at this time."
+            echo "✅ No target open PRs destination to 'qa' at this time."
             exit 0
           fi
           
-          # 4. Safely iterate through the PR array using index-based loop
+          # 4. 안전하게 인덱스 기반으로 PR 순회
           for i in $(seq 0 $((PR_COUNT - 1))); do
             PR=$(echo "$PR_JSON" | jq ".[$i]")
             
@@ -73,22 +72,22 @@ jobs:
             pr_author=$(echo "$PR" | jq -r '.author.login')
             head_owner=$(echo "$PR" | jq -r '.headRepositoryOwner.login')
 
-            echo "🔍 Analysing: PR #$pr_number [ $pr_head -> $pr_base ] (Author: $pr_author)"
+            echo "🔍 Auditing: PR #$pr_number [ $pr_head -> $pr_base ] (Author: $pr_author)"
             
-            # 5. Utilise the GitHub Compare API to verify if the latest staging commit is an ancestor of the PR head
+            # 5. GitHub API를 통해 staging 최신 커밋이 PR 브랜치의 히스토리에 포함되어 있는지 확인
             SYNC_STATUS=$(gh api repos/$CURRENT_REPO/compare/${STAGING_HEAD}...${head_owner}:${pr_oid} --jq '.status' 2>/dev/null || echo "unknown")
             
-            if [ "$SYNC_STATUS" = "identical" ] || [ "$SMS_STATUS" = "ahead" ] || [ "$SYNC_STATUS" = "identical" ]; then
+            if [ "$SYNC_STATUS" = "identical" ] || [ "$SYNC_STATUS" = "ahead" ]; then
               echo "  ✅ Up to date with the latest staging branch. (Status: $SYNC_STATUS)"
             else
               echo "  ❌ [Warning] Stale status detected! (Status: $SYNC_STATUS)"
               
-              # 6. Branch execution based on the evaluated dry-run status
+              # 6. 완벽하게 판별된 IS_DRY_RUN 변수를 기반으로 분기 처리
               if [ "$IS_DRY_RUN" = "true" ]; then
-                echo "  📝 [Dry-Run LOG] A rebase recommendation comment would have been posted to PR #$pr_number."
+                echo "  📝 [Dry-Run LOG] 실제 환경이었다면 PR #$pr_number 에 리베이스 권장 댓글을 남겼을 것입니다."
               else
-                gh pr comment $pr_number --repo $CURRENT_REPO --body "⚠️ **Stale Branch Notice**: New code has recently been merged into the staging branch. Please bring this branch up to date by merging or rebasing the latest staging branch! 🙏"
-                echo "  💬 Sync warning comment posted successfully to PR #$pr_number."
+                gh pr comment $pr_number --repo $CURRENT_REPO --body "⚠️ **Stale Branch Notice**: 최근 staging 브랜치에 새로운 승인 코드가 머지되었습니다. 원활하고 안전한 QA 검증을 위해 최신 staging 코드를 이 PR 브랜치에 반영(merge 또는 rebase)해 주세요! 🙏"
+                echo "  💬 Sync warning comment posted to PR #$pr_number."
               fi
             fi
             echo "------------------------------------------------"
