@@ -3,7 +3,13 @@ name: Staging Sync Guard
 on:
   push:
     branches:
-      - staging  # Triggers whenever a push or merge occurs on the staging branch
+      - staging
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '실제 댓글을 달지 않고 로그만 확인하려면 true로 설정하세요'
+        required: true
+        default: 'true'
 
 jobs:
   audit-prs:
@@ -12,48 +18,58 @@ jobs:
       pull-requests: write
       contents: read
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Audit Open PRs
+      # 💡 코드 체크아웃(checkout) 없이 바로 GitHub CLI로 연산을 수행합니다!
+      - name: Audit Open PRs for Staging Sync
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IS_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true' }}
         run: |
-          # 1. Update remote staging branch and extract its latest commit SHA
-          git fetch origin staging
-          STAGING_HEAD=$(git rev-parse origin/staging)
-          echo "🚀 Latest Remote Staging Head SHA: $STAGING_HEAD"
+          echo "🚀 Starting Staging Sync Guard (Strict Up-to-date Policy)"
           echo "------------------------------------------------"
           
-          # 2. Fetch PRs (Exclude any author whose login name contains 'dependabot' using jq case-insensitive test)
-          PR_LIST=$(gh pr list --state open --json number,baseRefName,headRefName,headRefOid,author --jq '.[] | select((.baseRefName=="qa" or .baseRefName=="staging") and (.author.login | test("dependabot"; "i") | not)) | "\(.number)|\(.baseRefName)|\(.headRefName)|\(.headRefOid)|\(.author.login)"')
+          # 1. 원격 staging 브랜치의 최신 커밋 SHA 확보
+          STAGING_HEAD=$(gh api repos/{owner}/{repo}/branches/staging --jq '.commit.sha')
+          echo "📍 Current Staging Latest SHA: $STAGING_HEAD"
+          echo "------------------------------------------------"
           
-          if [ -z "$PR_LIST" ]; then
-            echo "✅ No target PRs to audit at this time."
+          # 2. qa 브랜치를 타깃으로 하는 open PR 목록 추출 (Dependabot 제외)
+          PR_JSON=$(gh pr list --state open --json number,baseRefName,headRefName,headRefOid,author,headRepositoryOwner \
+            --jq '[.[] | select((.baseRefName=="qa") and (.author.login | test("dependabot"; "i") | not))]')
+          
+          PR_COUNT=$(echo "$PR_JSON" | jq '. | length')
+          if [ "$PR_COUNT" -eq 0 ]; then
+            echo "✅ No target open PRs destination to 'qa' at this time."
             exit 0
           fi
           
-          # 3. Loop through each PR to track branch lineage
-          echo "$PR_LIST" | while IFS='|' read -r pr_number pr_base pr_head pr_oid pr_author; do
-            # [Double Safety Guard] Explicitly skip the loop if the author name contains 'dependabot'
-            if [[ "$pr_author" == *"dependabot"* ]]; then
-              echo "箱 PR #$pr_number skipped (Reason: Created by Dependabot)"
-              continue
-            fi
+          # 3. 안전하게 인덱스 기반으로 PR 순회
+          for i in $(seq 0 $((PR_COUNT - 1))); do
+            PR=$(echo "$PR_JSON" | jq ".[$i]")
+            
+            pr_number=$(echo "$PR" | jq -r '.number')
+            pr_base=$(echo "$PR" | jq -r '.baseRefName')
+            pr_head=$(echo "$PR" | jq -r '.headRefName')
+            pr_oid=$(echo "$PR" | jq -r '.headRefOid')
+            pr_author=$(echo "$PR" | jq -r '.author.login')
+            head_owner=$(echo "$PR" | jq -r '.headRepositoryOwner.login')
 
             echo "🔍 Auditing: PR #$pr_number [ $pr_head -> $pr_base ] (Author: $pr_author)"
-            echo "   PR Head Commit OID: $pr_oid"
             
-            # Safely fetch the target feature branch from remote
-            git fetch origin $pr_head:$pr_head
+            # 4. GitHub API를 통해 staging 최신 커밋($STAGING_HEAD)이 PR 브랜치($pr_oid)의 히스토리에 포함되어 있는지 확인
+            # 결과 중 'status'가 'behind' 또는 'diverged'이면 최신 코드가 반영되지 않은 상태입니다.
+            SYNC_STATUS=$(gh api repos/{owner}/{repo}/compare/${STAGING_HEAD}...${head_owner}:${pr_oid} --jq '.status' 2>/dev/null || echo "unknown")
             
-            # Verify if the latest staging commit ($STAGING_HEAD) is an ancestor of the PR head commit ($pr_oid)
-            if git merge-base --is-ancestor $STAGING_HEAD $pr_oid; then
-              echo "  ✅ Up to date with the latest staging branch."
+            if [ "$SYNC_STATUS" = "identical" ] || [ "$SYNC_STATUS" = "ahead" ]; then
+              echo "  ✅ Up to date with the latest staging branch. (Status: $SYNC_STATUS)"
             else
-              echo "  ❌ [Warning] Stale status detected!"
-              gh pr comment $pr_number --body "⚠️ Notice: New code has been merged into staging, making this branch stale. To avoid any merge conflicts, please merge or rebase the latest staging branch! 🙏"
+              echo "  ❌ [Warning] Stale status detected! (Status: $SYNC_STATUS)"
+              
+              if [ "$IS_DRY_RUN" = "true" ]; then
+                echo "  📝 [Dry-Run] 실제 환경이었다면 PR #$pr_number 에 리베이스 권장 댓글을 남겼을 것입니다."
+              else
+                gh pr comment $pr_number --body "⚠️ **Stale Branch Notice**: 최근 staging 브랜치에 새로운 승인 코드가 머지되었습니다. 원활하고 안전한 QA 검증을 위해 최신 staging 코드를 이 PR 브랜치에 반영(merge 또는 rebase)해 주세요! 🙏"
+                echo "  💬 Sync warning comment posted to PR #$pr_number."
+              fi
             fi
             echo "------------------------------------------------"
           done
