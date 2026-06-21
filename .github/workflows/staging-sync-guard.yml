@@ -1,4 +1,4 @@
-name: Staging Sync Guard
+name: Staging Sync Guard (Debug Mode)
 
 on:
   push:
@@ -18,23 +18,42 @@ jobs:
       pull-requests: write
       contents: read
     steps:
+      # 🔍 [핵심 디버깅 스텝]: 인풋과 이벤트명이 실제 깃허브 메모리에 어떻게 찍히는지 raw 로그로 확인합니다.
+      - name: Debug Input Variables
+        run: |
+          echo "======================================"
+          echo "🔍 [GITHUB CONTEXT DEBUG]"
+          echo "Event Name: '${{ github.event_name }}'"
+          echo "Raw Inputs Dry Run: '${{ inputs.dry_run }}'"
+          echo "Raw Event Inputs Dry Run: '${{ github.event.inputs.dry_run }}'"
+          echo "======================================"
+
       - name: Audit Open PRs for Staging Sync
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # 💡 [수정]: github.event.inputs 대신 공식 표준인 inputs 구문을 사용합니다.
-          # 또한 push 이벤트일 때는 자동으로 dry_run이 false가 되도록 삼항 연산자 구조로 안전하게 처리합니다.
-          IS_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+          EVENT_NAME: ${{ github.event_name }}
+          # 안전하게 원본 문자를 Bash 변수로 넘깁니다.
+          RAW_DRY_RUN: ${{ inputs.dry_run }} 
         run: |
-          echo "🚀 Starting Staging Sync Guard (Strict Up-to-date Policy)"
-          echo "⚙️ Current Mode - IS_DRY_RUN value: '$IS_DRY_RUN'" # 디버깅용 로그 추가
+          echo "🚀 Starting Staging Sync Guard"
+          
+          # 💡 [대소문자 완벽 방어]: 깃허브가 True(대문자)로 주든 true(소문자)로 주든, 
+          # Bash 내부에서 모두 소문자로 강제 변환(,,)합니다.
+          DRY_RUN_LOWER=$(echo "${RAW_DRY_RUN,,}")
+          
+          # push 트리거가 터졌을 때는 명시적으로 dry_run을 false로 고정하고, 수동일 때만 입력값을 따릅니다.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$DRY_RUN_LOWER" = "true" ]; then
+            IS_DRY_RUN="true"
+          else
+            IS_DRY_RUN="false"
+          fi
+          
+          echo "⚙️ Evaluated Mode -> IS_DRY_RUN: '$IS_DRY_RUN' (Converted Input: '$DRY_RUN_LOWER')"
           echo "------------------------------------------------"
           
-          # 1. 원격 staging 브랜치의 최신 커밋 SHA 확보
+          # [이하 로직 동일하지만 안전하게 IS_DRY_RUN 변수 사용]
           STAGING_HEAD=$(gh api repos/{owner}/{repo}/branches/staging --jq '.commit.sha')
-          echo "📍 Current Staging Latest SHA: $STAGING_HEAD"
-          echo "------------------------------------------------"
           
-          # 2. qa 브랜치를 타깃으로 하는 open PR 목록 추출 (Dependabot 제외)
           PR_JSON=$(gh pr list --state open --json number,baseRefName,headRefName,headRefOid,author,headRepositoryOwner \
             --jq '[.[] | select((.baseRefName=="qa") and (.author.login | test("dependabot"; "i") | not))]')
           
@@ -44,10 +63,8 @@ jobs:
             exit 0
           fi
           
-          # 3. 안전하게 인덱스 기반으로 PR 순회
           for i in $(seq 0 $((PR_COUNT - 1))); do
             PR=$(echo "$PR_JSON" | jq ".[$i]")
-            
             pr_number=$(echo "$PR" | jq -r '.number')
             pr_base=$(echo "$PR" | jq -r '.baseRefName')
             pr_head=$(echo "$PR" | jq -r '.headRefName')
@@ -55,19 +72,18 @@ jobs:
             pr_author=$(echo "$PR" | jq -r '.author.login')
             head_owner=$(echo "$PR" | jq -r '.headRepositoryOwner.login')
 
-            echo "🔍 Auditing: PR #$pr_number [ $pr_head -> $pr_base ] (Author: $pr_author)"
+            echo "🔍 Auditing: PR #$pr_number [ $pr_head -> $pr_base ]"
             
-            # 4. GitHub API를 통해 staging 최신 커밋($STAGING_HEAD)이 PR 브랜치($pr_oid)의 히스토리에 포함되어 있는지 확인
             SYNC_STATUS=$(gh api repos/{owner}/{repo}/compare/${STAGING_HEAD}...${head_owner}:${pr_oid} --jq '.status' 2>/dev/null || echo "unknown")
             
             if [ "$SYNC_STATUS" = "identical" ] || [ "$SYNC_STATUS" = "ahead" ]; then
-              echo "  ✅ Up to date with the latest staging branch. (Status: $SYNC_STATUS)"
+              echo "  ✅ Up to date. (Status: $SYNC_STATUS)"
             else
-              echo "  ❌ [Warning] Stale status detected! (Status: $SYNC_STATUS)"
+              echo "  ❌ [Warning] Stale! (Status: $SYNC_STATUS)"
               
-              # 💡 [보안 강화]: 어떤 이유로든 변수가 꼬였을 때를 대비해, 명시적으로 true인 경우에만 Dry-Run으로 작동하게 합니다.
+              # 명시적으로 문자열 "true" 일 때만 댓글 생략
               if [ "$IS_DRY_RUN" = "true" ]; then
-                echo "  📝 [Dry-Run] 실제 환경이었다면 PR #$pr_number 에 리베이스 권장 댓글을 남겼을 것입니다."
+                echo "  📝 [Dry-Run] PR #$pr_number 댓글 작성 스킵 (로그 전용)"
               else
                 gh pr comment $pr_number --body "⚠️ **Stale Branch Notice**: 최근 staging 브랜치에 새로운 승인 코드가 머지되었습니다. 원활하고 안전한 QA 검증을 위해 최신 staging 코드를 이 PR 브랜치에 반영(merge 또는 rebase)해 주세요! 🙏"
                 echo "  💬 Sync warning comment posted to PR #$pr_number."
