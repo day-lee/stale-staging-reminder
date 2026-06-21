@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: '실제 댓글을 달지 않고 로그만 확인하려면 true로 설정하세요'
+        description: 'Set to true to verify the logs only without posting actual comments'
         required: true
         default: 'true'
 
@@ -21,30 +21,48 @@ jobs:
       - name: Audit Open PRs for Staging Sync
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # 💡 [수정]: github.event.inputs 대신 공식 표준인 inputs 구문을 사용합니다.
-          # 또한 push 이벤트일 때는 자동으로 dry_run이 false가 되도록 삼항 연산자 구조로 안전하게 처리합니다.
-          IS_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+          GH_REPO: ${{ github.repository }}
+          CURRENT_REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          # Safely forward the original text to prevent system variable naming conflicts
+          MY_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
         run: |
-          echo "🚀 Starting Staging Sync Guard (Strict Up-to-date Policy)"
-          echo "⚙️ Current Mode - IS_DRY_RUN value: '$IS_DRY_RUN'" # 디버깅용 로그 추가
+          echo "🚀 Starting Staging Sync Guard (Strict Up-to-date Staging Policy)"
+          echo "📍 Current Repository Context: '$CURRENT_REPO'"
+          echo "📍 Raw Trigger Event: '$EVENT_NAME'"
           echo "------------------------------------------------"
           
-          # 1. 원격 staging 브랜치의 최신 커밋 SHA 확보
-          STAGING_HEAD=$(gh api repos/{owner}/{repo}/branches/staging --jq '.commit.sha')
+          # 1. Mode Evaluation Safeguard
+          # Convert incoming string to lowercase to handle both 'True' and 'true' seamlessly
+          DRY_RUN_LOWER=$(echo "${MY_DRY_RUN,,}")
+          
+          # Activate dry-run mode only if manually triggered and explicitly set to true
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$DRY_RUN_LOWER" = "true" ]; then
+            IS_DRY_RUN="true"
+            echo "⚙️ Mode: [DRY-RUN] Executing log-only mode. No comments will be published."
+          else
+            IS_DRY_RUN="false"
+            echo "⚙️ Mode: [PRODUCTION] Live mode active. Stale PRs will receive warning comments."
+          fi
+          echo "------------------------------------------------"
+          
+          # 2. Fetch the latest commit SHA of the remote staging branch
+          STAGING_HEAD=$(gh api repos/$CURRENT_REPO/branches/staging --jq '.commit.sha')
           echo "📍 Current Staging Latest SHA: $STAGING_HEAD"
           echo "------------------------------------------------"
           
-          # 2. qa 브랜치를 타깃으로 하는 open PR 목록 추출 (Dependabot 제외)
-          PR_JSON=$(gh pr list --state open --json number,baseRefName,headRefName,headRefOid,author,headRepositoryOwner \
+          # 3. Extract open PRs targeting the 'qa' branch (excluding Dependabot)
+          # Explicitly pass the --repo flag to ensure the CLI operates seamlessly without a local .git directory
+          PR_JSON=$(gh pr list --repo $CURRENT_REPO --state open --json number,baseRefName,headRefName,headRefOid,author,headRepositoryOwner \
             --jq '[.[] | select((.baseRefName=="qa") and (.author.login | test("dependabot"; "i") | not))]')
           
           PR_COUNT=$(echo "$PR_JSON" | jq '. | length')
           if [ "$PR_COUNT" -eq 0 ]; then
-            echo "✅ No target open PRs destination to 'qa' at this time."
+            echo "✅ No target open PRs destined for 'qa' at this time."
             exit 0
           fi
           
-          # 3. 안전하게 인덱스 기반으로 PR 순회
+          # 4. Safely iterate through the PR array using index-based loop
           for i in $(seq 0 $((PR_COUNT - 1))); do
             PR=$(echo "$PR_JSON" | jq ".[$i]")
             
@@ -55,22 +73,22 @@ jobs:
             pr_author=$(echo "$PR" | jq -r '.author.login')
             head_owner=$(echo "$PR" | jq -r '.headRepositoryOwner.login')
 
-            echo "🔍 Auditing: PR #$pr_number [ $pr_head -> $pr_base ] (Author: $pr_author)"
+            echo "🔍 Analysing: PR #$pr_number [ $pr_head -> $pr_base ] (Author: $pr_author)"
             
-            # 4. GitHub API를 통해 staging 최신 커밋($STAGING_HEAD)이 PR 브랜치($pr_oid)의 히스토리에 포함되어 있는지 확인
-            SYNC_STATUS=$(gh api repos/{owner}/{repo}/compare/${STAGING_HEAD}...${head_owner}:${pr_oid} --jq '.status' 2>/dev/null || echo "unknown")
+            # 5. Utilise the GitHub Compare API to verify if the latest staging commit is an ancestor of the PR head
+            SYNC_STATUS=$(gh api repos/$CURRENT_REPO/compare/${STAGING_HEAD}...${head_owner}:${pr_oid} --jq '.status' 2>/dev/null || echo "unknown")
             
-            if [ "$SYNC_STATUS" = "identical" ] || [ "$SYNC_STATUS" = "ahead" ]; then
+            if [ "$SYNC_STATUS" = "identical" ] || [ "$SMS_STATUS" = "ahead" ] || [ "$SYNC_STATUS" = "identical" ]; then
               echo "  ✅ Up to date with the latest staging branch. (Status: $SYNC_STATUS)"
             else
               echo "  ❌ [Warning] Stale status detected! (Status: $SYNC_STATUS)"
               
-              # 💡 [보안 강화]: 어떤 이유로든 변수가 꼬였을 때를 대비해, 명시적으로 true인 경우에만 Dry-Run으로 작동하게 합니다.
+              # 6. Branch execution based on the evaluated dry-run status
               if [ "$IS_DRY_RUN" = "true" ]; then
-                echo "  📝 [Dry-Run] 실제 환경이었다면 PR #$pr_number 에 리베이스 권장 댓글을 남겼을 것입니다."
+                echo "  📝 [Dry-Run LOG] A rebase recommendation comment would have been posted to PR #$pr_number."
               else
-                gh pr comment $pr_number --body "⚠️ **Stale Branch Notice**: 최근 staging 브랜치에 새로운 승인 코드가 머지되었습니다. 원활하고 안전한 QA 검증을 위해 최신 staging 코드를 이 PR 브랜치에 반영(merge 또는 rebase)해 주세요! 🙏"
-                echo "  💬 Sync warning comment posted to PR #$pr_number."
+                gh pr comment $pr_number --repo $CURRENT_REPO --body "⚠️ **Stale Branch Notice**: New code has recently been merged into the staging branch. Please bring this branch up to date by merging or rebasing the latest staging branch! 🙏"
+                echo "  💬 Sync warning comment posted successfully to PR #$pr_number."
               fi
             fi
             echo "------------------------------------------------"
