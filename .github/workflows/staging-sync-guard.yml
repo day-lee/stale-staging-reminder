@@ -24,20 +24,19 @@ jobs:
           GH_REPO: ${{ github.repository }}
           CURRENT_REPO: ${{ github.repository }}
           EVENT_NAME: ${{ github.event_name }}
-          # 💡 [해결]: 시스템 내장 변수인 INPUT_DRY_RUN과의 이름 충돌을 원천 차단하기 위해 
-          # 접두사를 MY_ 로 완전히 격리하여 안전하게 문자열을 주입합니다.
-          MY_DRY_RUN: ${{ inputs.dry_run }}
+          # 💡 수동 트리거일 때만 입력값을 전달하고, push일 때는 공백이 들어옵니다.
+          MY_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
         run: |
           echo "🚀 Starting Staging Sync Guard (Strict Up-to-date Policy)"
+          echo "📍 Current Repository Context: '$CURRENT_REPO'"
+          echo "📍 Raw Trigger Event: '$EVENT_NAME'"
+          echo "'$MY_DRY_RUN'"
           echo "------------------------------------------------"
-          echo "변수 값 확인 my_dry_run: '$MY_DRY_RUN' 
           
-          # 1. ⚙️ [모드 판별 안전장치]
-          # 깃허브가 보낸 대소문자를 소문자로 강제 통일 (True/true 모두 대응)
-          DRY_RUN_LOWER=$(echo "${MY_DRY_RUN,,}")
           
-          # 수동 트리거(workflow_dispatch)이면서 dry_run 입력이 명시적으로 'true'일 때만 무알림 모드 발동
-          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$DRY_RUN_LOWER" = "true" ]; then
+          # 1. ⚙️ [모드 판별 안전장치 - 완벽 패치]
+          # 오직 수동 트리거(workflow_dispatch)이면서 명시적으로 true를 입력했을 때만 무알림 모드 발동
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "${MY_DRY_RUN,,}" = "true" ]; then
             IS_DRY_RUN="true"
             echo "⚙️ Mode: [DRY-RUN] 실제 댓글을 달지 않고 로그만 출력합니다."
           else
@@ -52,7 +51,8 @@ jobs:
           echo "------------------------------------------------"
           
           # 3. qa 브랜치를 타깃으로 하는 open PR 목록 추출 (Dependabot 제외)
-          PR_JSON=$(gh pr list --state open --json number,baseRefName,headRefName,headRefOid,author,headRepositoryOwner \
+          # 💡 [해결]: --repo 옵션을 명시하여 .git 폴더가 없어도 원격에서 PR 목록을 정확히 가져옵니다.
+          PR_JSON=$(gh pr list --repo $CURRENT_REPO --state open --json number,baseRefName,headRefName,headRefOid,author,headRepositoryOwner \
             --jq '[.[] | select((.baseRefName=="qa") and (.author.login | test("dependabot"; "i") | not))]')
           
           PR_COUNT=$(echo "$PR_JSON" | jq '. | length')
@@ -86,7 +86,7 @@ jobs:
               if [ "$IS_DRY_RUN" = "true" ]; then
                 echo "  📝 [Dry-Run LOG] 실제 환경이었다면 PR #$pr_number 에 리베이스 권장 댓글을 남겼을 것입니다."
               else
-                gh pr comment $pr_number --body "⚠️ **Stale Branch Notice**: 최근 staging 브랜치에 새로운 승인 코드가 머지되었습니다. 원활하고 안전한 QA 검증을 위해 최신 staging 코드를 이 PR 브랜치에 반영(merge 또는 rebase)해 주세요! 🙏"
+                gh pr comment $pr_number --repo $CURRENT_REPO --body "⚠️ **Stale Branch Notice**: 최근 staging 브랜치에 새로운 승인 코드가 머지되었습니다. 원활하고 안전한 QA 검증을 위해 최신 staging 코드를 이 PR 브랜치에 반영(merge 또는 rebase)해 주세요! 🙏"
                 echo "  💬 Sync warning comment posted to PR #$pr_number."
               fi
             fi
