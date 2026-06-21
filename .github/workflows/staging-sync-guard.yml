@@ -18,13 +18,15 @@ jobs:
       pull-requests: write
       contents: read
     steps:
-      # 💡 코드 체크아웃(checkout) 없이 바로 GitHub CLI로 연산을 수행합니다!
       - name: Audit Open PRs for Staging Sync
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          IS_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true' }}
+          # 💡 [수정]: github.event.inputs 대신 공식 표준인 inputs 구문을 사용합니다.
+          # 또한 push 이벤트일 때는 자동으로 dry_run이 false가 되도록 삼항 연산자 구조로 안전하게 처리합니다.
+          IS_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
         run: |
           echo "🚀 Starting Staging Sync Guard (Strict Up-to-date Policy)"
+          echo "⚙️ Current Mode - IS_DRY_RUN value: '$IS_DRY_RUN'" # 디버깅용 로그 추가
           echo "------------------------------------------------"
           
           # 1. 원격 staging 브랜치의 최신 커밋 SHA 확보
@@ -56,7 +58,6 @@ jobs:
             echo "🔍 Auditing: PR #$pr_number [ $pr_head -> $pr_base ] (Author: $pr_author)"
             
             # 4. GitHub API를 통해 staging 최신 커밋($STAGING_HEAD)이 PR 브랜치($pr_oid)의 히스토리에 포함되어 있는지 확인
-            # 결과 중 'status'가 'behind' 또는 'diverged'이면 최신 코드가 반영되지 않은 상태입니다.
             SYNC_STATUS=$(gh api repos/{owner}/{repo}/compare/${STAGING_HEAD}...${head_owner}:${pr_oid} --jq '.status' 2>/dev/null || echo "unknown")
             
             if [ "$SYNC_STATUS" = "identical" ] || [ "$SYNC_STATUS" = "ahead" ]; then
@@ -64,6 +65,7 @@ jobs:
             else
               echo "  ❌ [Warning] Stale status detected! (Status: $SYNC_STATUS)"
               
+              # 💡 [보안 강화]: 어떤 이유로든 변수가 꼬였을 때를 대비해, 명시적으로 true인 경우에만 Dry-Run으로 작동하게 합니다.
               if [ "$IS_DRY_RUN" = "true" ]; then
                 echo "  📝 [Dry-Run] 실제 환경이었다면 PR #$pr_number 에 리베이스 권장 댓글을 남겼을 것입니다."
               else
