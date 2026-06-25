@@ -53,7 +53,7 @@ jobs:
           
           # 3. Extract open PRs targeting the 'qa' branch (excluding Dependabot)
           # Explicitly pass the --repo flag to ensure the CLI operates seamlessly without a local .git directory
-          PR_JSON=$(gh pr list --repo $CURRENT_REPO --state open --json number,baseRefName,headRefName,headRefOid,author,headRepositoryOwner \
+          PR_JSON=$(gh pr list --repo $CURRENT_REPO --state open --json number,baseRefName,headRefName,headRefOid,author \
             --jq '[.[] | select((.baseRefName=="qa") and (.author.login | test("dependabot"; "i") | not))]')
           
           PR_COUNT=$(echo "$PR_JSON" | jq '. | length')
@@ -71,12 +71,12 @@ jobs:
             pr_head=$(echo "$PR" | jq -r '.headRefName')
             pr_oid=$(echo "$PR" | jq -r '.headRefOid')
             pr_author=$(echo "$PR" | jq -r '.author.login')
-            head_owner=$(echo "$PR" | jq -r '.headRepositoryOwner.login')
+
 
             echo "🔍 Analysing: PR #$pr_number [ $pr_head -> $pr_base ] (Author: $pr_author)"
             
             # 5. Utilise the GitHub Compare API to verify if the latest staging commit is an ancestor of the PR head
-            SYNC_STATUS=$(gh api repos/$CURRENT_REPO/compare/${STAGING_HEAD}...${head_owner}:${pr_oid} --jq '.status' 2>/dev/null || echo "unknown")
+            SYNC_STATUS=$(gh api repos/$CURRENT_REPO/compare/${STAGING_HEAD}...${pr_oid} --jq '.status' 2>/dev/null || echo "unknown")
             
             if [ "$SYNC_STATUS" = "identical" ] || [ "$SMS_STATUS" = "ahead" ] || [ "$SYNC_STATUS" = "identical" ]; then
               echo "  ✅ Up to date with the latest staging branch. (Status: $SYNC_STATUS)"
