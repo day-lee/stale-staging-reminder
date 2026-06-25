@@ -87,8 +87,8 @@ jobs:
               if [ "$IS_DRY_RUN" = "true" ]; then
                 echo "  📝 [Dry-Run LOG] A rebase recommendation comment would have been posted to PR #$pr_number."
               else
-                COMMENT_BODY="⚠️ **Stale Branch Notice**: New code has recently been merged into the staging branch. Please update your branch using one of the following methods:\n\n
-                1. **Rebase** your branch on top of the latest staging.\n\n
+                COMMENT_BODY="⚠️ **Stale Branch Notice**: New code has recently been merged into the staging branch. Please update your branch using one of the following methods:
+                1. **Rebase** your branch on top of the latest staging.
                 2. **Re-create** your branch from the latest staging and **cherry-pick** your commits. 🙏"
 
                 gh pr comment $pr_number --repo $CURRENT_REPO --body "$COMMENT_BODY"
