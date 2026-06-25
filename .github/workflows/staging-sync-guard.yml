@@ -86,8 +86,13 @@ jobs:
               if [ "$IS_DRY_RUN" = "true" ]; then
                 echo "  📝 [Dry-Run LOG] 실제 환경이었다면 PR #$pr_number 에 리베이스 권장 댓글을 남겼을 것입니다."
               else
-                gh pr comment $pr_number --repo $CURRENT_REPO --body "⚠️ **Stale Branch Notice**: 최근 staging 브랜치에 새로운 승인 코드가 머지되었습니다. 원활하고 안전한 QA 검증을 위해 최신 staging 코드를 이 PR 브랜치에 반영(merge 또는 rebase)해 주세요! 🙏"
-                echo "  💬 Sync warning comment posted to PR #$pr_number."
+                COMMENT_BODY="⚠️ **Stale Branch Notice**: New code has recently been merged into the staging branch. Please update your branch using one of the following methods:
+
+                1. **Rebase** your branch on top of the latest staging.
+                2. **Re-create** your branch from the latest staging and **cherry-pick** your commits. 🙏"
+
+                gh pr comment $pr_number --repo $CURRENT_REPO --body "$COMMENT_BODY"
+                echo "  💬 Sync warning comment posted successfully to PR #$pr_number."
               fi
             fi
             echo "------------------------------------------------"
